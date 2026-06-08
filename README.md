@@ -1,98 +1,150 @@
-# Download Assemblies from NCBI BioSamples
+# Download or Assemble Genomes from NCBI BioSamples
 
-Download genome assemblies from NCBI using BioSample accessions and generate an updated sample sheet containing assembly paths.
+This workflow retrieves genome assemblies associated with NCBI BioSamples. When no assembly is available, it automatically downloads sequencing reads and performs de novo assembly using the bundled `denovo_assembler` workflow.
 
 ## Overview
 
-This script:
+For each sample:
 
-1. Reads a TSV file containing sample metadata.
-2. Retrieves the associated assembly for each BioSample from NCBI.
-3. Downloads the assembly FASTA (`*.fna.gz`).
-4. Stores assemblies as:
+1. Query NCBI BioSample.
+2. Search for an associated assembly.
+3. If an assembly exists:
 
-```
+   * Prefer RefSeq.
+   * Fall back to GenBank.
+   * Download the genome FASTA.
+4. If no assembly exists:
+
+   * Download reads using `fasterq-dump`.
+   * Run the `denovo_assembler` workflow.
+   * Generate an assembly from the downloaded reads.
+5. Produce a unified assembly table containing assembly paths for all samples.
+
+Assemblies are stored as:
+
+```text
 <output_directory>/<Sample_ID>.fna.gz
 ```
-
-5. Produces an output TSV containing all original columns plus an additional `Assembly` column with the relative path to the downloaded genome.
-
-Assemblies that already exist are skipped automatically.
 
 ---
 
 ## Requirements
 
+### Software
+
 * Bash ≥ 4
 * Singularity / Apptainer
-* NCBI EDirect installed inside the container
-* `wget`
-* `awk`
+* Snakemake
+* wget
+* pigz
+* awk
 
-Default container:
+### Containers
 
-```
+NCBI EDirect:
+
+```text
 /home/vasarhelyib/containers/mesti90-ncbi_edirect.24.7.20250903.sif
+```
+
+NCBI SRA Tools:
+
+```text
+/home/vasarhelyib/containers/ncbi-sra-tools.3.4.1.sif
+```
+
+### Repository Structure
+
+```text
+download_biosamples/
+├── download_biosample_genomes.sh
+└── denovo_assembler/
+```
+
+If using a git submodule:
+
+```bash
+git clone --recursive <repo>
+```
+
+or:
+
+```bash
+git submodule update --init --recursive
 ```
 
 ---
 
 ## Input Format
 
-Input must be a tab-separated file containing at least the following columns:
+Input must be a tab-separated file containing at least:
 
 | Column    | Description              |
 | --------- | ------------------------ |
 | Sample_ID | Unique sample identifier |
 | Biosample | NCBI BioSample accession |
+| Species   | Species name             |
 
 Example:
 
 ```tsv
-Sample_ID	Biosample	Country
-KP001	SAMN12345678	Hungary
-KP002	SAMN87654321	France
+Sample_ID	Biosample	Species
+KP001	SAMN12345678	Klebsiella pneumoniae
+KP002	SAMN87654321	Klebsiella pneumoniae
 ```
 
-Additional columns are preserved in the output table.
+Additional columns are preserved.
 
 ---
 
 ## Usage
 
 ```bash
-download_biosamples.sh \
+download_biosample_genomes.sh \
 	-i samples.tsv \
 	-o genomes \
 	-t assemblies.tsv
 ```
 
-### Options
+---
 
-| Option | Description                          |
-| ------ | ------------------------------------ |
-| `-i`   | Input TSV file                       |
-| `-o`   | Output directory for assemblies      |
-| `-t`   | Output TSV containing assembly paths |
-| `-f`   | File containing failed downloads     |
-| `-c`   | Singularity container                |
-| `-h`   | Show help message                    |
+## Options
+
+| Option | Description                                             |
+| ------ | ------------------------------------------------------- |
+| `-i`   | Input TSV                                               |
+| `-o`   | Output genome directory                                 |
+| `-r`   | Output reads directory                                  |
+| `-f`   | Failed/assembly sample sheet                            |
+| `-c`   | EDirect container                                       |
+| `-d`   | SRA Tools container                                     |
+| `-t`   | Output assembly table                                   |
+| `-n`   | Threads for fasterq-dump                                |
+| `-s`   | Skip NCBI assembly lookup and continue from failed file |
+| `-h`   | Show help                                               |
 
 Defaults:
 
 ```text
 Input TSV:          biosamples.tsv
-Output directory:   genomes
-Output table:       assemblies.tsv
+Genome directory:   genomes
+Reads directory:    sra_reads
+Assembly table:     assemblies.tsv
 Failed file:        failed_biosamples.txt
-Container:          /home/vasarhelyib/containers/mesti90-ncbi_edirect.24.7.20250903.sif
+Threads:            8
+
+EDirect container:
+  /home/vasarhelyib/containers/mesti90-ncbi_edirect.24.7.20250903.sif
+
+SRA container:
+  /home/vasarhelyib/containers/ncbi-sra-tools.3.4.1.sif
 ```
 
 ---
 
-## Output
+## Output Files
 
-### Downloaded assemblies
+### Assemblies
 
 ```text
 genomes/
@@ -101,70 +153,96 @@ genomes/
 └── KP003.fna.gz
 ```
 
-### Updated sample sheet
-
-Input:
-
-```tsv
-Sample_ID	Biosample	Country
-KP001	SAMN12345678	Hungary
-KP002	SAMN87654321	France
-```
-
-Output:
-
-```tsv
-Sample_ID	Biosample	Country	Assembly
-KP001	SAMN12345678	Hungary	genomes/KP001.fna.gz
-KP002	SAMN87654321	France	genomes/KP002.fna.gz
-```
+Some genomes may originate from NCBI assemblies, while others may be generated by the de novo assembly workflow.
 
 ---
 
-## Failed Downloads
+### Assembly Table
 
-BioSamples for which no assembly could be found or downloaded are written to:
+```text
+assemblies.tsv
+```
+
+Example:
+
+```tsv
+Sample_ID	Biosample	Species	Assembly
+KP001	SAMN12345678	Klebsiella pneumoniae	genomes/KP001.fna.gz
+KP002	SAMN87654321	Klebsiella pneumoniae	genomes/KP002.fna.gz
+```
+
+The table is populated before assembly begins and therefore may contain paths to genomes that are generated later by the de novo assembly workflow.
+
+---
+
+### Assembly Sample Sheet
+
+Samples lacking an NCBI assembly are written to:
 
 ```text
 failed_biosamples.txt
 ```
 
-Example:
+Format:
+
+```tsv
+Sample_ID	Biosample	Species	R1	R2	Assembly
+KP003	SAMN99999999	Klebsiella pneumoniae	sra_reads/SAMN99999999_1.fastq.gz	sra_reads/SAMN99999999_2.fastq.gz	genomes/KP003.fna.gz
+```
+
+This file serves directly as the input sample sheet for the assembler workflow.
+
+---
+
+### Downloaded Reads
 
 ```text
-KP003	SAMN99999999
-KP004	SAMN88888888
+sra_reads/
+├── SAMN99999999_1.fastq.gz
+├── SAMN99999999_2.fastq.gz
+└── ...
+```
+
+Reads are downloaded only for samples lacking an existing assembly.
+
+---
+
+## Restarting From Downloaded Reads
+
+If assembly lookup has already been completed and only read download / assembly should be rerun:
+
+```bash
+download_biosample_genomes.sh \
+	-s \
+	-f failed_biosamples.txt
+```
+
+This skips the NCBI assembly search phase and resumes using the existing assembler sample sheet.
+
+---
+
+## Workflow Summary
+
+```text
+BioSample
+   │
+   ├── Assembly available
+   │      └── Download genome FASTA
+   │
+   └── No assembly available
+          ├── fasterq-dump
+          ├── Compress FASTQ files
+          ├── Run denovo_assembler
+          └── Generate genome assembly
 ```
 
 ---
 
 ## Notes
 
-* RefSeq assemblies are preferred when available.
-* If no RefSeq assembly exists, the corresponding GenBank assembly is used.
-* Existing non-empty assembly files are not downloaded again.
-* The output TSV includes both newly downloaded and previously existing assemblies.
-* Paths in the `Assembly` column are stored as relative paths, making the output suitable for downstream Snakemake workflows.
-
----
-
-## Example Snakemake Integration
-
-```python
-rule download_assemblies:
-	input:
-		"samples.tsv"
-	output:
-		table="assemblies.tsv",
-		failed="failed_biosamples.txt"
-	params:
-		outdir="genomes"
-	shell:
-		"""
-		download_biosamples.sh \
-			-i {input} \
-			-o {params.outdir} \
-			-t {output.table} \
-			-f {output.failed}
-		"""
-```
+* RefSeq assemblies are preferred over GenBank assemblies.
+* Existing genome FASTA files are not downloaded again.
+* Existing FASTQ files are not downloaded again.
+* All samples receive an entry in `assemblies.tsv`.
+* `failed_biosamples.txt` is an assembler input table, not merely a list of failed BioSamples.
+* De novo assembly is performed automatically using the bundled `denovo_assembler` workflow.
