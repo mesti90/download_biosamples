@@ -159,6 +159,8 @@ fi
 
 mkdir -p "$READDIR"
 READDIR=$(realpath "$READDIR")
+FAILED_SRA="failed_sra_downloads.txt"
+: > "$FAILED_SRA"
 
 tail -n +2 "$FAILED" | awk -F'\t' '{print $2}' | while read -r BIOSAMPLE; do
 	[[ -z "$BIOSAMPLE" ]] && continue
@@ -173,13 +175,18 @@ tail -n +2 "$FAILED" | awk -F'\t' '{print $2}' | while read -r BIOSAMPLE; do
 
 	echo "Processing: $BIOSAMPLE"
 
-	singularity exec "$SRA_CONTAINER" \
+	if singularity exec "$SRA_CONTAINER" \
 		fasterq-dump "$BIOSAMPLE" \
 		-O "$READDIR" \
 		--split-files \
-		-e "$THREADS"
+		-e "$THREADS"; then
 
-	pigz -f "$READDIR/${BIOSAMPLE}"_*.fastq || true
+		pigz -f "$READDIR/${BIOSAMPLE}"_*.fastq || true
+	else
+		echo "FAILED: $BIOSAMPLE" >&2
+		echo "$BIOSAMPLE" >> "$FAILED_SRA"
+		continue
+	fi
 done
 
 # Now we can create a table for the assembler with the failed BioSamples and their corresponding reads, which can be used to run the assembly pipeline on these samples.
@@ -194,11 +201,60 @@ if [[ $(wc -l < "$FAILED") -le 1 ]]; then
 	exit 0
 fi
 
+ASSEMBLY_INPUT="$(mktemp)"
+
+head -n 1 "$FAILED" > "$ASSEMBLY_INPUT"
+
+if [[ -s "$FAILED_SRA" ]]; then
+	tail -n +2 "$FAILED" \
+		| grep -F -v -f "$FAILED_SRA" \
+		>> "$ASSEMBLY_INPUT"
+else
+	tail -n +2 "$FAILED" >> "$ASSEMBLY_INPUT"
+fi
+
+if [[ $(wc -l < "$ASSEMBLY_INPUT") -le 1 ]]; then
+	echo "No samples remaining for assembly."
+	exit 0
+fi
+
 snakemake \
 	--snakefile "${ASSEMBLER_DIR}/Snakefile" \
 	--configfile "${ASSEMBLER_DIR}/config.yaml" \
-	--config samples="${FAILED}" \
+	--config samples="${ASSEMBLY_INPUT}" assembly_path="${OUTDIR}" \
 	-j 40 \
 	--profile "${ASSEMBLER_DIR}/profiles/server"
 
 
+#remove assemblies that failed to download and update the assembly table with the actual paths of the successfully downloaded assemblies
+
+
+TMP="$(mktemp)"
+
+awk -F'\t' '
+BEGIN {
+	OFS = FS
+}
+NR == 1 {
+	for (i = 1; i <= NF; i++) {
+		if ($i == "Assembly") {
+			assembly_col = i
+			break
+		}
+	}
+
+	if (!assembly_col) {
+		print "ERROR: Assembly column not found" > "/dev/stderr"
+		exit 1
+	}
+
+	print
+	next
+}
+{
+	if (system("[ -s \"" $assembly_col "\" ]") == 0)
+		print
+}
+' assemblies.tsv > "$TMP"
+
+mv "$TMP" assemblies.tsv
